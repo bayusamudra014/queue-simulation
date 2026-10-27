@@ -1,0 +1,80 @@
+# Two scenarios, selected with profiles:
+#   docker compose --profile sync up --build    -> Scenario 1 (blocking)
+#   docker compose --profile queue up --build   -> Scenario 2 (queue)
+# Settings come from .env (WORKER_REPLICAS, WORKER_CONCURRENCY, REPORT_MS, ROW_MS, DEFAULT_REPORT_ROWS,
+# SUCCESS_RATE, DLQ_ENABLED, JOB_ATTEMPTS).
+
+x-app: &app
+  build: .
+  environment: &env
+    REPORT_MS: ${REPORT_MS:-10000}            # DB query delay per report
+    ROW_MS: ${ROW_MS:-10}                     # time to build one row
+    DEFAULT_REPORT_ROWS: ${DEFAULT_REPORT_ROWS:-100}  # default rows when the request sends none
+    SUCCESS_RATE: ${SUCCESS_RATE:-1}          # chance (0..1) that one attempt succeeds
+    DLQ_ENABLED: ${DLQ_ENABLED:-false}        # queue: dead-letter queue on/off
+    JOB_ATTEMPTS: ${JOB_ATTEMPTS:-3}          # queue: tries per job, only when DLQ_ENABLED=true
+    SMTP_HOST: mailpit                        # mock email server (see below)
+    SMTP_PORT: "1025"
+
+services:
+  # ---------- Shared: mock email server ----------
+  # Catches every email B sends; open the inbox at http://localhost:8025
+  mailpit:
+    image: axllent/mailpit:latest
+    profiles: ["sync", "queue"]
+    ports:
+      - "8025:8025"   # web inbox
+      - "1025:1025"   # SMTP
+
+  # ---------- Scenario 1: synchronous ----------
+  service-a-sync:
+    <<: *app
+    profiles: ["sync"]
+    command: node sync/service-a.js
+    ports: ["3000:3000"]
+    environment:
+      <<: *env
+      PORT: "3000"
+      B_URL: http://service-b-sync:4000
+    depends_on: [service-b-sync]
+
+  service-b-sync:
+    <<: *app
+    profiles: ["sync"]
+    command: node sync/service-b.js
+    environment:
+      <<: *env
+      PORT: "4000"
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-2}   # requests per B container
+    deploy:
+      replicas: ${WORKER_REPLICAS:-1}                # number of B containers
+    depends_on: [mailpit]
+
+  # ---------- Scenario 2: queue ----------
+  redis:
+    image: redis:7-alpine
+    profiles: ["queue"]
+    ports: ["6379:6379"]
+
+  service-a-queue:
+    <<: *app
+    profiles: ["queue"]
+    command: node queue/service-a.js
+    ports: ["3000:3001"]
+    environment:
+      <<: *env
+      PORT: "3001"
+      REDIS_HOST: redis
+    depends_on: [redis]
+
+  worker-b:
+    <<: *app
+    profiles: ["queue"]
+    command: node queue/worker-b.js
+    environment:
+      <<: *env
+      REDIS_HOST: redis
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-2}   # jobs per worker container
+    deploy:
+      replicas: ${WORKER_REPLICAS:-1}                # number of worker containers
+    depends_on: [redis, mailpit]
