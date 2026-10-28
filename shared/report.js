@@ -26,22 +26,23 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  */
 async function generateReport({ email, reportType, rows = DEFAULT_REPORT_ROWS }, onProgress = () => {}) {
   const started = Date.now();
-  const buildMs = rows * ROW_MS;
   console.log(`[report] START  ${reportType} for ${email} (query ${REPORT_MS} ms + ${rows} rows x ${ROW_MS} ms)`);
 
-  // 1) Query the DB: fixed delay, whatever the report size. Progress 0 -> 50%.
+  // 1) Query the DB: fixed delay, whatever the report size. No rows built yet, so progress stays 0%.
   await sleep(REPORT_MS);
   if (Math.random() >= SUCCESS_RATE) {
     console.log(`[report] FAIL   ${reportType} for ${email}: simulated DB error (SUCCESS_RATE=${SUCCESS_RATE})`);
     throw new Error(`Simulated DB error (SUCCESS_RATE=${SUCCESS_RATE})`);
   }
-  await onProgress(50);
 
-  // 2) Build the rows: grows with the report size. Progress 50 -> 100% in 5 steps.
-  const steps = 5;
-  for (let i = 1; i <= steps; i++) {
-    await sleep(buildMs / steps); // pretend: format rows, render charts...
-    await onProgress(50 + i * 10);
+  // 2) Build the rows: progress = rows built / total rows. Rows are built in chunks of ~10%
+  // so a big report doesn't send one progress update (one Redis write) per row.
+  const chunk = Math.max(1, Math.ceil(rows / 10));
+  for (let built = 0; built < rows; ) {
+    const n = Math.min(chunk, rows - built);
+    await sleep(n * ROW_MS); // pretend: format n rows, render charts...
+    built += n;
+    await onProgress(Math.round((built / rows) * 100));
   }
 
   const fileName = `report-${reportType}-${Date.now()}.csv`;
